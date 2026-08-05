@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -277,15 +278,44 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	return {**waf_cookies, **user_cookies}
 
 
-def execute_check_in(client, account_name: str, provider_config, headers: dict):
-	"""执行签到请求"""
+TRANSIENT_CHECKIN_ERROR_KEYWORDS = (
+	'lock_write_growth',
+	'database is locked',
+	'deadlock',
+	'lock wait timeout',
+	'temporarily unavailable',
+	'try again later',
+	'too many requests',
+	'rate limit',
+)
+
+
+def is_transient_checkin_error(message: str) -> bool:
+	"""判断服务端错误是否值得自动重试。"""
+	normalized = message.strip().lower()
+	return any(keyword in normalized for keyword in TRANSIENT_CHECKIN_ERROR_KEYWORDS)
+
+
+def get_positive_int_env(name: str, default: int) -> int:
+	try:
+		return max(1, int(os.getenv(name, str(default))))
+	except ValueError:
+		print(f'[WARNING] Invalid {name}; using default {default}')
+		return default
+
+
+def execute_check_in_once(client, account_name: str, provider_config, headers: dict):
+	"""执行一次签到请求，返回 (成功, 是否可重试, 错误信息)。"""
 	print(f'[NETWORK] {account_name}: Executing check-in')
 
 	checkin_headers = headers.copy()
 	checkin_headers.update({'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
 
 	sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
-	response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
+	try:
+		response = client.post(sign_in_url, headers=checkin_headers, timeout=30)
+	except httpx.RequestError as error:
+		return False, True, f'Network error: {error}'
 
 	print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
 
@@ -294,25 +324,48 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 			result = response.json()
 			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
 				print(f'[SUCCESS] {account_name}: Check-in successful!')
-				return True
+				return True, False, ''
 			else:
-				error_msg = result.get('msg', result.get('message', 'Unknown error'))
+				error_msg = str(result.get('msg', result.get('message', 'Unknown error')))
 				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
 				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
 					print(f'[SUCCESS] {account_name}: Already checked in today')
-					return True
-				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
-				return False
+					return True, False, ''
+				return False, is_transient_checkin_error(error_msg), error_msg
 		except json.JSONDecodeError:
 			if 'success' in response.text.lower():
 				print(f'[SUCCESS] {account_name}: Check-in successful!')
-				return True
-			else:
-				print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
-				return False
-	else:
-		print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
-		return False
+				return True, False, ''
+			return False, False, 'Invalid response format'
+
+	is_transient = response.status_code in {408, 409, 425, 429} or response.status_code >= 500
+	return False, is_transient, f'HTTP {response.status_code}'
+
+
+def execute_check_in(client, account_name: str, provider_config, headers: dict):
+	"""执行签到请求，并对网络/限流/数据库锁等临时故障做有限重试。"""
+	max_attempts = get_positive_int_env('CHECKIN_MAX_ATTEMPTS', 3)
+	base_delay = get_positive_int_env('CHECKIN_RETRY_DELAY_SECONDS', 60)
+	error_msg = 'Unknown error'
+	attempts_made = 0
+
+	for attempt in range(1, max_attempts + 1):
+		attempts_made = attempt
+		success, retryable, error_msg = execute_check_in_once(client, account_name, provider_config, headers)
+		if success:
+			return True
+		if not retryable or attempt == max_attempts:
+			break
+
+		delay = base_delay * attempt
+		print(
+			f'[WARNING] {account_name}: Transient check-in failure ({error_msg}); '
+			f'retrying in {delay}s ({attempt}/{max_attempts})'
+		)
+		time.sleep(delay)
+
+	print(f'[FAILED] {account_name}: Check-in failed after {attempts_made} attempt(s) - {error_msg}')
+	return False
 
 
 def format_check_in_notification(detail: dict) -> str:
@@ -635,7 +688,7 @@ async def main():
 	else:
 		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
 
-	sys.exit(0 if success_count > 0 else 1)
+	sys.exit(0 if success_count == total_count else 1)
 
 
 def run_main():

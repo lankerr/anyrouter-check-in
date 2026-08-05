@@ -1,0 +1,32 @@
+name: Keep Scheduled Workflows Active
+
+on:
+  schedule:
+    # Public repositories lose scheduled workflows after 60 days without activity.
+    - cron: '41 3 1 * *'
+  workflow_dispatch:
+
+concurrency:
+  group: keep-scheduled-workflows-active
+  cancel-in-progress: false
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Update monthly activity marker
+        run: echo "Last active $(date -u +'%Y-%m-%dT%H:%M:%SZ')" > .github/last-active.txt
+
+      - name: Commit marker
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/last-active.txt
+          git diff --staged --quiet || git commit -m "chore: keep scheduled workflows active [skip ci]"
+          git pull --rebase origin main
+          git push

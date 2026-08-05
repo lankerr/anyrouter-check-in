@@ -121,14 +121,16 @@
 
 ## 执行时间
 
-- 脚本每 6 小时执行一次（1. action 无法准确触发，基本延时 1~1.5h；2. 目前观测到 anyrouter 的签到是每 24h 而不是零点就可签到）
+- 脚本每 6 小时的第 17 分钟执行一次，避开 GitHub Actions 整点高峰（计划任务仍可能有少量延迟）
+- 网络错误、HTTP 429/5xx、数据库锁等临时故障会自动重试三次
+- 公开 Fork 每月自动提交一次保活标记，避免 60 天无活动后 schedule 被 GitHub 停用
 - 你也可以随时手动触发签到
 
 ## 注意事项
 
 - 请确保每个账号的 cookies 和 API User 都是正确的
 - 可以在 Actions 页面查看详细的运行日志
-- 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
+- 多账号中只要有一个最终失败，整个任务会标红并保留失败日志，避免“部分失败但 Actions 仍显示成功”
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
 
